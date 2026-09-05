@@ -207,9 +207,9 @@ jobs:
         run: |
           mkdir -p myapp/assets/icon
           sudo apt-get install -y imagemagick
+          # icon_url adalah link gambar bebas dari user (bukan endpoint GitHub) -
+          # JANGAN kirim token GitHub ke sini, itu bocor token ke server pihak ketiga.
           curl -L \
-            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
-            -H "Accept: application/octet-stream" \
             "${{ github.event.inputs.icon_url }}" \
             -o myapp/assets/icon/icon_raw
           convert myapp/assets/icon/icon_raw -resize 1024x1024 myapp/assets/icon/icon.png
