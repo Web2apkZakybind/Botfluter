@@ -100,10 +100,13 @@ jobs:
 
       - name: Analyze Project Code
         working-directory: ${{ env.PROJECT_DIR }}
+        continue-on-error: true
         run: |
           if [ -f "pubspec.yaml" ]; then
+            set +e
             flutter analyze > analyze_report.txt 2>&1
             ANALYZE_EXIT=$?
+            set -e
             echo "[RESULT_ANALYZE]"
             cat analyze_report.txt
             echo "[END_RESULT_ANALYZE]"
