@@ -57,10 +57,25 @@ jobs:
         run: |
           echo "=== Validating ZIP ==="
           if ! unzip -t project.zip > /dev/null 2>&1; then
+            echo "⚠️  ZIP belum valid, retry download sekali (asset mungkin belum ready)..."
+            sleep 5
+            curl -L \
+              -H "Authorization: Bearer ${{ secrets.GH_TOKEN }}" \
+              -H "Accept: application/octet-stream" \
+              "${{ github.event.inputs.zip_url }}" \
+              -o project.zip \
+              -w "\n=== Retry HTTP Status: %{http_code} ===\n"
+          fi
+
+          if ! unzip -t project.zip > /dev/null 2>&1; then
             echo "❌ File bukan ZIP valid!"
             echo ""
-            echo "=== Isi file ==="
-            cat project.zip
+            echo "=== Info file (aman, bukan isi mentah) ==="
+            file project.zip
+            ls -lh project.zip
+            echo ""
+            echo "=== 200 byte pertama (hex) ==="
+            xxd project.zip | head -12
             exit 1
           fi
           echo "✅ ZIP valid"
