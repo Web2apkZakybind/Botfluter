@@ -36,12 +36,12 @@ jobs:
           echo "=== Downloading ZIP ==="
           echo "URL: ${{ github.event.inputs.zip_url }}"
 
-          curl -L \
+          curl -fL --retry 5 --retry-all-errors --retry-delay 3 --connect-timeout 15 \
             -H "Authorization: Bearer ${{ secrets.GH_TOKEN }}" \
             -H "Accept: application/octet-stream" \
             "${{ github.event.inputs.zip_url }}" \
             -o project.zip \
-            -w "\n=== HTTP Status: %{http_code} ===\n=== Final URL: %{url_effective} ===\n"
+            -w "\n=== HTTP Status: %{http_code} ===\n=== Downloaded bytes: %{size_download} ===\n=== Final URL: %{url_effective} ===\n"
 
           echo ""
           echo "=== File Info ==="
@@ -51,34 +51,37 @@ jobs:
           file project.zip
           echo ""
           echo "=== First Bytes ==="
-          xxd project.zip | head -2
+          xxd -l 64 project.zip
 
       - name: Extract ZIP
         run: |
           echo "=== Validating ZIP ==="
-          if ! unzip -t project.zip > /dev/null 2>&1; then
-            echo "⚠️  ZIP belum valid, retry download sekali (asset mungkin belum ready)..."
-            sleep 5
-            curl -L \
+          ATTEMPT=1
+          while [ "$ATTEMPT" -le 3 ] && ! unzip -t project.zip > /dev/null 2>&1; do
+            echo "⚠️  ZIP belum valid (percobaan $ATTEMPT/3), retry download (transfer mungkin putus di tengah jalan / asset belum ready)..."
+            sleep $((ATTEMPT * 5))
+            curl -fL --retry 5 --retry-all-errors --retry-delay 3 --connect-timeout 15 \
               -H "Authorization: Bearer ${{ secrets.GH_TOKEN }}" \
               -H "Accept: application/octet-stream" \
               "${{ github.event.inputs.zip_url }}" \
               -o project.zip \
-              -w "\n=== Retry HTTP Status: %{http_code} ===\n"
-          fi
+              -w "\n=== Retry HTTP Status: %{http_code} ===\n=== Downloaded bytes: %{size_download} ===\n"
+            ATTEMPT=$((ATTEMPT + 1))
+          done
 
           if ! unzip -t project.zip > /dev/null 2>&1; then
-            echo "❌ File bukan ZIP valid!"
+            echo "❌ File bukan ZIP valid setelah 3x percobaan!"
             echo ""
             echo "=== Info file (aman, bukan isi mentah) ==="
             file project.zip
             ls -lh project.zip
             echo ""
-            echo "=== 200 byte pertama (hex) ==="
-            xxd project.zip | head -12
+            echo "=== 64 byte pertama (hex) ==="
+            xxd -l 64 project.zip
             exit 1
           fi
           echo "✅ ZIP valid"
+
 
           echo ""
           echo "=== Extracting ZIP ==="
