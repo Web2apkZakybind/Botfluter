@@ -133,29 +133,51 @@ jobs:
       - name: Fix AGP 9 compatibility
         working-directory: ${{ env.PROJECT_DIR }}
         run: |
-          # Workaround AGP 9.0 breaking changes (built-in Kotlin / new DSL)
-          # Banyak project & plugin lama belum siap AGP 9
-          if [ -d "android" ]; then
-            mkdir -p android
-            PROP_FILE="android/gradle.properties"
-            touch "$PROP_FILE"
-            grep -q "android.builtInKotlin" "$PROP_FILE" || echo "android.builtInKotlin=false" >> "$PROP_FILE"
-            grep -q "android.newDsl" "$PROP_FILE" || echo "android.newDsl=false" >> "$PROP_FILE"
-            grep -q "android.defaults.buildfeatures.buildconfig" "$PROP_FILE" || echo "android.defaults.buildfeatures.buildconfig=true" >> "$PROP_FILE"
-            grep -q "android.nonTransitiveRClass" "$PROP_FILE" || echo "android.nonTransitiveRClass=false" >> "$PROP_FILE"
-            grep -q "org.gradle.jvmargs" "$PROP_FILE" || echo "org.gradle.jvmargs=-Xmx4G -XX:MaxMetaspaceSize=1G -XX:+HeapDumpOnOutOfMemoryError" >> "$PROP_FILE"
-            echo "=== android/gradle.properties ==="
-            cat "$PROP_FILE"
+          if [ ! -d "android" ]; then
+            echo "Folder android tidak ada, skip fix AGP"
+            exit 0
           fi
+
+          PROP_FILE="android/gradle.properties"
+          touch "$PROP_FILE"
+
+          # Paksa flag AGP 9 opt-out
+          sed -i "/^android.builtInKotlin=/d" "$PROP_FILE" 2>/dev/null || true
+          sed -i "/^android.newDsl=/d" "$PROP_FILE" 2>/dev/null || true
+          sed -i "/^android.defaults.buildfeatures.buildconfig=/d" "$PROP_FILE" 2>/dev/null || true
+          sed -i "/^android.nonTransitiveRClass=/d" "$PROP_FILE" 2>/dev/null || true
+          {
+            echo "android.builtInKotlin=false"
+            echo "android.newDsl=false"
+            echo "android.defaults.buildfeatures.buildconfig=true"
+            echo "android.nonTransitiveRClass=false"
+            echo "org.gradle.jvmargs=-Xmx4G -XX:MaxMetaspaceSize=1G -XX:+HeapDumpOnOutOfMemoryError"
+          } >> "$PROP_FILE"
+
+          # Turunkan AGP 9.x -> 8.7.2 di settings.gradle*
+          for SF in android/settings.gradle android/settings.gradle.kts; do
+            if [ -f "$SF" ]; then
+              sed -i -E "s/version[[:space:]]+['\"]9\.[0-9.]+['\"]/version \"8.7.2\"/g" "$SF" 2>/dev/null || true
+              echo "=== $SF ==="
+              cat "$SF" || true
+            fi
+          done
+
+          echo "=== android/gradle.properties ==="
+          cat "$PROP_FILE"
 
       - name: Build APK
         working-directory: ${{ env.PROJECT_DIR }}
         run: |
           if [ -f "pubspec.yaml" ]; then
-            flutter build apk --${{ github.event.inputs.build_type }} --verbose 2>&1 || {
-              echo "❌ flutter build gagal, coba lagi dengan --no-tree-shake-icons..."
+            set +e
+            flutter build apk --${{ github.event.inputs.build_type }} 2>&1
+            BUILD_EXIT=$?
+            set -e
+            if [ "$BUILD_EXIT" -ne 0 ]; then
+              echo "❌ Build gagal (exit $BUILD_EXIT), retry --no-tree-shake-icons..."
               flutter build apk --${{ github.event.inputs.build_type }} --no-tree-shake-icons
-            }
+            fi
           else
             GRADLE_PATH=$(find . -name "gradlew" | head -n 1)
             GRADLE_DIR=$(dirname "$GRADLE_PATH")
