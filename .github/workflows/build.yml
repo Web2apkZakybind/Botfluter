@@ -95,6 +95,7 @@ jobs:
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
         with:
+          flutter-version: "3.41.4"
           channel: "stable"
           cache: true
 
@@ -123,78 +124,127 @@ jobs:
         if: ${{ github.event.inputs.only_analyze == 'true' }}
         run: exit ${{ env.ANALYZE_EXIT }}
 
-      - name: Get dependencies
+      - name: Prepare Android project
         working-directory: ${{ env.PROJECT_DIR }}
         run: |
-          if [ -f "pubspec.yaml" ]; then
-            timeout 120s flutter pub get || echo "⚠️ Lanjut..."
+          set -e
+          if [ ! -f "pubspec.yaml" ]; then
+            echo "No pubspec.yaml, skip Flutter prep"
+            exit 0
           fi
 
-      - name: Fix AGP 9 compatibility
-        working-directory: ${{ env.PROJECT_DIR }}
-        run: |
+          # Pastikan folder android ada
           if [ ! -d "android" ]; then
-            echo "Folder android tidak ada, skip fix AGP"
-            exit 0
+            echo "Folder android tidak ada, generate..."
+            flutter create --platforms=android .
           fi
 
           PROP_FILE="android/gradle.properties"
           touch "$PROP_FILE"
-
-          # Paksa flag AGP 9 opt-out
           sed -i "/^android.builtInKotlin=/d" "$PROP_FILE" 2>/dev/null || true
           sed -i "/^android.newDsl=/d" "$PROP_FILE" 2>/dev/null || true
           sed -i "/^android.defaults.buildfeatures.buildconfig=/d" "$PROP_FILE" 2>/dev/null || true
           sed -i "/^android.nonTransitiveRClass=/d" "$PROP_FILE" 2>/dev/null || true
+          sed -i "/^org.gradle.jvmargs=/d" "$PROP_FILE" 2>/dev/null || true
+          sed -i "/^android.enableR8.fullMode=/d" "$PROP_FILE" 2>/dev/null || true
           {
             echo "android.builtInKotlin=false"
             echo "android.newDsl=false"
             echo "android.defaults.buildfeatures.buildconfig=true"
             echo "android.nonTransitiveRClass=false"
+            echo "android.enableR8.fullMode=false"
             echo "org.gradle.jvmargs=-Xmx4G -XX:MaxMetaspaceSize=1G -XX:+HeapDumpOnOutOfMemoryError"
+            echo "org.gradle.parallel=true"
           } >> "$PROP_FILE"
 
-          # Turunkan AGP 9.x -> 8.7.2 di settings.gradle*
+          # Patch AGP 9 -> 8.7.2 di settings
           for SF in android/settings.gradle android/settings.gradle.kts; do
             if [ -f "$SF" ]; then
               sed -i -E "s/version[[:space:]]+['\"]9\.[0-9.]+['\"]/version \"8.7.2\"/g" "$SF" 2>/dev/null || true
-              echo "=== $SF ==="
-              cat "$SF" || true
             fi
           done
 
-          echo "=== android/gradle.properties ==="
+          # Patch classpath AGP di build.gradle lama
+          for BF in android/build.gradle android/build.gradle.kts; do
+            if [ -f "$BF" ]; then
+              sed -i -E "s/com\.android\.tools\.build:gradle:9\.[0-9.]+/com.android.tools.build:gradle:8.7.2/g" "$BF" 2>/dev/null || true
+            fi
+          done
+
+          echo "=== gradle.properties ==="
           cat "$PROP_FILE"
 
-      - name: Build APK
+          echo "=== flutter pub get ==="
+          set +e
+          flutter pub get
+          PUB_EXIT=$?
+          set -e
+          if [ "$PUB_EXIT" -ne 0 ]; then
+            echo "pub get gagal, coba flutter clean + pub get..."
+            flutter clean || true
+            flutter pub get || true
+          fi
+
+      - name: Build APK (multi-fallback)
         working-directory: ${{ env.PROJECT_DIR }}
         run: |
+          set +e
+          BUILD_TYPE="${{ github.event.inputs.build_type }}"
+          if [ -z "$BUILD_TYPE" ]; then BUILD_TYPE="release"; fi
+
+          build_once() {
+            local mode="$1"
+            local extra="$2"
+            echo ""
+            echo "=========================================="
+            echo " TRY: flutter build apk --$mode $extra"
+            echo "=========================================="
+            flutter build apk --$mode $extra
+            return $?
+          }
+
+          SUCCESS=0
           if [ -f "pubspec.yaml" ]; then
-            set +e
-            flutter build apk --${{ github.event.inputs.build_type }} 2>&1
-            BUILD_EXIT=$?
-            set -e
-            if [ "$BUILD_EXIT" -ne 0 ]; then
-              echo "❌ Build gagal (exit $BUILD_EXIT), retry --no-tree-shake-icons..."
-              flutter build apk --${{ github.event.inputs.build_type }} --no-tree-shake-icons
+            # Urutan fallback: requested -> no-tree-shake -> debug -> debug no-tree-shake
+            if build_once "$BUILD_TYPE" ""; then
+              SUCCESS=1
+            elif build_once "$BUILD_TYPE" "--no-tree-shake-icons"; then
+              SUCCESS=1
+            elif [ "$BUILD_TYPE" != "debug" ] && build_once "debug" ""; then
+              SUCCESS=1
+            elif build_once "debug" "--no-tree-shake-icons"; then
+              SUCCESS=1
             fi
           else
             GRADLE_PATH=$(find . -name "gradlew" | head -n 1)
-            GRADLE_DIR=$(dirname "$GRADLE_PATH")
-            cd "$GRADLE_DIR" && chmod +x gradlew
-            if [ "${{ github.event.inputs.build_type }}" = "debug" ]; then
-              ./gradlew assembleDebug
-            else
-              ./gradlew assembleRelease
+            if [ -n "$GRADLE_PATH" ]; then
+              GRADLE_DIR=$(dirname "$GRADLE_PATH")
+              cd "$GRADLE_DIR" && chmod +x gradlew
+              ./gradlew assembleRelease || ./gradlew assembleDebug
+              [ $? -eq 0 ] && SUCCESS=1
             fi
           fi
+          set -e
+
+          if [ "$SUCCESS" -ne 1 ]; then
+            echo "❌ Semua strategi build gagal"
+            exit 1
+          fi
+          echo "✅ Build sukses"
 
       - name: Check APK Output
         run: |
           APK_FOUND=$(find $GITHUB_WORKSPACE -name "*.apk" | head -n 1)
+          if [ -z "$APK_FOUND" ]; then
+            echo "❌ Tidak ada file APK hasil build"
+            find $GITHUB_WORKSPACE -type f -name "*.apk" -o -name "*.aab" 2>/dev/null | head -20
+            exit 1
+          fi
           APK_PATH=$(echo "$APK_FOUND" | sed "s|$GITHUB_WORKSPACE/||")
+          echo "APK ditemukan: $APK_PATH"
           echo "PROJECT_DIR=$GITHUB_WORKSPACE" >> $GITHUB_ENV
           echo "APK_PATH=$APK_PATH" >> $GITHUB_ENV
+          ls -lh "$APK_FOUND"
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
